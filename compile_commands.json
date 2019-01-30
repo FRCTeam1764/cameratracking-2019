@@ -1,0 +1,12 @@
+[
+{
+  "directory": "/home/jackson/opencv/tests/cvcam",
+  "command": "/usr/bin/c++   -I/home/jackson/opencv/tests/cvcam/src -isystem /usr/include/opencv   -std=c++17 -ggdb   -std=gnu++17 -o CMakeFiles/my_test.dir/src/main.cpp.o -c /home/jackson/opencv/tests/cvcam/src/main.cpp",
+  "file": "/home/jackson/opencv/tests/cvcam/src/main.cpp"
+},
+{
+  "directory": "/home/jackson/opencv/tests/cvcam",
+  "command": "/usr/bin/c++   -I/home/jackson/opencv/tests/cvcam/src -isystem /usr/include/opencv   -std=c++17 -ggdb   -std=gnu++17 -o CMakeFiles/my_test.dir/src/cli/flag_interpreter.cpp.o -c /home/jackson/opencv/tests/cvcam/src/cli/flag_interpreter.cpp",
+  "file": "/home/jackson/opencv/tests/cvcam/src/cli/flag_interpreter.cpp"
+}
+]
