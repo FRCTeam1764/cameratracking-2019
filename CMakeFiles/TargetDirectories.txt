@@ -1,3 +1,0 @@
-/home/jackson/opencv/tests/cvcam/CMakeFiles/rebuild_cache.dir
-/home/jackson/opencv/tests/cvcam/CMakeFiles/my_test.dir
-/home/jackson/opencv/tests/cvcam/CMakeFiles/edit_cache.dir
