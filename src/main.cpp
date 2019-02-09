@@ -12,13 +12,29 @@ int main()
 #include <functional>
 #include <map>
 #include <optional>
+#include <sys/time.h>
 
 
 #include "opencv2/opencv.hpp"
 #include "opencv2/imgproc.hpp"
 
 #include "cli/flag_interpreter.hpp"
+#include "network/network.hpp"
+#include "serialization/serialization.hpp"
+
 using namespace cv;
+
+
+
+double get_unix_time()
+{
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+
+    return static_cast<double>(tv.tv_sec)+(static_cast<double>(tv.tv_usec)/(static_cast<double>(10e6))); //Add the microseconds divded by 10e6 to end up with seconds.microseconds
+    //Static casting intensifies
+}
+
 
 
 
@@ -74,6 +90,17 @@ cv::Point get_rightmost_point(std::vector<cv::Point> point_vec)
 	},
 	point_vec);
 }
+class compare_rects_leftmost_lower
+{
+	public:
+		bool operator()(std::vector<cv::Point> const & lhs, std::vector<cv::Point> const & rhs)
+		{
+			cv::Point lhs_l = get_leftmost_point(lhs);	
+			cv::Point rhs_l = get_leftmost_point(rhs);	
+
+			return lhs_l.x < rhs_l.x;
+		}
+};
 void test_point_filter()
 {
 	std::vector<cv::Point> t1;
@@ -153,8 +180,10 @@ double channel_closeness(Vec3b const & channel, Vec3b const & target)
 Mat closeness_rating(Mat const & image, Vec3b const & target)
 {
 	Mat final_img(image.size(),CV_8UC1);
+#pragma omp parallel
 	for (size_t row = 0; row < image.rows; row++)
 	{
+#pragma omp parallel
 		for( size_t col = 0; col < image.cols; col++)
 		{
 			auto px = image.at<Vec3b>(row,col);
@@ -178,15 +207,34 @@ enum class pull_mode
 	video_path
 };
 
+
+/*!
+ * Write to the socket a serialization_state of constant size (12 bytes) which contains a 64-bit int that is the size of the following
+ * serialization state (data) to be sent, then send the data in data.
+ */
+void send_serialization_data(serialization::serialization_state const & data, network::socket & socket)
+{
+	serialization::serialization_state size_state(1);
+	serialization::serialize(static_cast<serialization::size_tp>(data.bufferUsed),size_state); //serialize the size of the first buffer (will always come out as 12 bytes)
+
+	socket.write(std::string(size_state.buffer,12)); // inform them of the size of the next one. the "+4" is to skip the version uint32_t present on all serialization_state's.
+	socket.write(std::string(data.buffer,data.bufferUsed)); //send the data over.
+}
+
 int main(int argument_count, char** arguments)
 {
 
+#if __BYTE_ORDER == __BIG_ENDIAN
+	printf("big\n");
+#else
+	printf("little\n");
+#endif
 
 
 	flag_interpreter::results_t flags;
 
 	auto shorthands = flag_interpreter::shorthands_t{
-		{"c","camera"}, {"p","picture_path"},{"v","video_path"},{"h","help"}
+		{"c","camera"}, {"p","picture_path"},{"v","video_path"},{"h","help"},{"g","gui"},{"t","time"},{"ds","downsample"}, 
 	};
 	try 
     {   
@@ -199,6 +247,10 @@ int main(int argument_count, char** arguments)
     }   
 
 	bool has_picture_method = false;
+	bool display_gui = false;
+	bool measure_time = false;
+	bool downsample_gui = false;
+
 	std::optional<int> camera_port;
 	std::optional<std::string> picture_path;
 	std::optional<std::string> video_path;
@@ -252,11 +304,89 @@ int main(int argument_count, char** arguments)
 			}
 			video_path = flag.option[0];
 		}
+		else if (flag.flag == "gui")
+		{
+			display_gui = true;
+		}
+		else if (flag.flag == "time")
+		{
+			measure_time = true;
+		}
 		else if (flag.flag == "help")
 		{
 			//TODO this should be a generic function to generate this string from descriptions and shorthands_t
 			printf("Camera tracking help\n--help\t-h\tShows this dialog.\n--picture_path\t-p\tSpecify a static picture file to be used for camera tracking(probably for debugging)\n--video_path\t-v\tSpecify a static video file to be used for camera tracking\n--camera\t-c\tSpecify a camera port for camera tracking (0 is the default system camera)\n");
 			exit(0);
+		}
+		else if (flag.flag == "downsample")
+		{
+			downsample_gui = true; 
+		}
+		else if (flag.flag == "sockettestserver")
+		{
+			network::socket server(5667);
+
+			server.bind_as_server();
+
+			auto client = server.listen_for_client();
+
+			printf("recieved msg %s\n",client.read(14).c_str());
+
+
+			uint32_t data = 0;
+			while(true)
+			{
+				serialization::serialization_state state(1);
+				serialization::serialize(data,state);
+				serialization::serialize((float)data,state);
+
+				send_serialization_data(state,client);
+				data++;
+			}
+
+
+			return 0;
+		}
+		else if (flag.flag == "sockettestclient")
+		{
+			network::socket client(5667);
+
+			client.connect_to_server("127.0.0.1");
+			client.write("Hello, World!!\n");
+
+			while(true)
+			{
+				//get size
+				std::string buf_size = client.read(12);
+
+				auto unser_size_state = serialization::unserialization_state(buf_size.data());
+
+				//alloc
+				auto need_to_read = static_cast<size_t>(serialization::unserialize<serialization::size_tp>(unser_size_state));
+				need_to_read = 8;
+				printf("v %d ntr %lu\n",unser_size_state.serializedVersion,need_to_read);
+				auto buffer = client.read(need_to_read);
+				auto unser_state = serialization::unserialization_state(buffer.data());
+
+				for (size_t i = 0; i < need_to_read; i++)
+				{
+					printf("this byte %d\n",(unsigned char) buffer[i]);
+				}
+
+				uint32_t result = serialization::unserialize<uint32_t>(unser_state);
+
+				printf("Got number %d\n",result);
+			}
+
+
+
+
+			//printf("recieved msg %s\n",client.read(12).c_str());
+			return 0;
+		}
+		else
+		{
+			throw std::runtime_error("Unrecognized command "+flag.flag);
 		}
 			
 			
@@ -279,6 +409,12 @@ int main(int argument_count, char** arguments)
     VideoCapture cap;
 	Mat picture;
 
+
+	double total_frame_time = 0.f;
+	double total_camera_capture_time = 0.f;
+	int frame_times_sampled = 0;
+	int total_frames = 0;
+
 	
 	if (camera_port.has_value())
 	{
@@ -287,6 +423,8 @@ int main(int argument_count, char** arguments)
 		{
 			throw std::runtime_error("camera doesn't exist");
 		}
+		cap.set(cv::CAP_PROP_FRAME_WIDTH,1280);
+		cap.set(cv::CAP_PROP_FRAME_HEIGHT,720);
 	}
 	else if (picture_path.has_value())
 	{
@@ -295,12 +433,23 @@ int main(int argument_count, char** arguments)
 
 
     Mat edges;
-    namedWindow("edges",1);
+	if (display_gui)
+	{
+		namedWindow("edges",1);
+	}
 
 	test_point_filter();
 
+
+	
     while(true)
     {
+		double start_time;
+		if (measure_time)
+		{
+			start_time = get_unix_time();
+		}
+
 		//cap.set(CAP_PROP_AUTO_EXPOSURE, 1);
 		//cap.set(CAP_PROP_EXPOSURE, 000);
 		
@@ -312,6 +461,13 @@ int main(int argument_count, char** arguments)
 		else if (picture_path.has_value())
 		{
 			picture.copyTo(frame);
+		}
+
+		
+		double time_took_to_take_picture;
+		if (measure_time)
+		{
+			time_took_to_take_picture = get_unix_time()-start_time;
 		}
 		//frame = imread("red_test_img.png");
 		
@@ -328,42 +484,9 @@ int main(int argument_count, char** arguments)
 		*/
 
 
-		Mat planes[3];
-		split(frame,planes);
 		//0: blue
 		//1: green
 		//2: red
-
-
-		/*
-		Mat red_inv;
-		bitwise_not(planes[2],red_inv);
-		Mat blue_inv;
-		bitwise_not(planes[0],blue_inv);
-
-		Mat _tmp;
-
-		Mat green_only;
-
-		planes[1].copyTo(green_only);
-		*/
-		/*_tmp = planes[1] - planes[2];
-		green_only = _tmp - planes[0];*/
-
-		//Mat green_only = green_only_negatives;//planes[1];
-
-		//planes[0] -= planes[1];
-		//planes[0] -= planes[2];
-
-
-        /*cvtColor(frame, edges, CV_BGR2GRAY);
-#define L 21
-		for (size_t i = 1; i < L; i+=2)
-		{
-			medianBlur(edges,edges,i);
-		}
-        GaussianBlur(edges, edges, Size(7,7), 1.5, 1.5);
-        Canny(edges, edges, 10, 30, 3);*/
 
 
 		auto in = Vec3b{232,255,126};
@@ -371,10 +494,7 @@ int main(int argument_count, char** arguments)
 
 		Mat filtered;
 
-		Mat after_thresh;
-		threshold(correct_pxs, after_thresh, 100,255, THRESH_TOZERO);
-
-        GaussianBlur(after_thresh, filtered, Size(7,7), 1.5, 1.5);
+		GaussianBlur(correct_pxs, filtered, Size(7,7), 1.5, 1.5);
 
 
 
@@ -382,6 +502,9 @@ int main(int argument_count, char** arguments)
 		std::vector<cv::Vec4i> out_hiearchy;
 
 		findContours(filtered, out_contours, out_hiearchy, RETR_LIST, CHAIN_APPROX_TC89_L1);
+
+
+		std::sort(out_contours.begin(), out_contours.end(), compare_rects_leftmost_lower());
 
 
 		
@@ -395,23 +518,44 @@ int main(int argument_count, char** arguments)
 		}*/
 		printf("countr # %d\n",out_contours.size());
 
-		auto finalimg = draw_rects_on_image(frame, out_contours);
+		
 
- 
-		if (out_contours.size() >= 2)
+
+
+		if (display_gui)
 		{
-			cv::Point center = center_point_on_angled_rects(out_contours);
-
-			circle(finalimg, center, 30, Scalar(100,200,255),5);
+			auto finalimg = draw_rects_on_image(frame, out_contours);
+			if (out_contours.size() >= 2)
+			{
+				cv::Point center = center_point_on_angled_rects(out_contours);
+				circle(finalimg, center, 30, Scalar(100,200,255),5);
+			}
+			if (downsample_gui)
+			{
+				cv::Mat resized;
+				cv::resize(finalimg,resized,cv::Size(320,240),0,0,cv::INTER_NEAREST);
+				imshow("edges",resized);
+			}
+			else
+			{
+				imshow("edges",finalimg);//channel_closeness({210,255,0}, frame));
+			}
+			if(waitKey(30) >= 0) printf("k\n");
 		}
-
-
-
-        imshow("edges",finalimg);//channel_closeness({210,255,0}, frame));
 		//imwrite("redchntest",planes[0]);
 		printf("showed img\n");
-        if(waitKey(30) >= 0) printf("k\n");
-		usleep(16);
+
+		
+		if (measure_time)
+		{
+			double time_took = get_unix_time()-start_time;
+
+			total_frame_time += time_took;
+			total_camera_capture_time += time_took_to_take_picture;
+			frame_times_sampled++;
+			printf("this frame: %f FPS\navg: %f FPS over %d samples\n",1/time_took,frame_times_sampled/total_frame_time,frame_times_sampled);
+			printf("camera: %f FPS\navg: %f FPS\n",1/time_took_to_take_picture, frame_times_sampled/total_camera_capture_time);
+		}
     }
     // the camera will be deinitialized automatically in video_pathCapture destructor
     return 0;
