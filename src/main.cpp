@@ -101,6 +101,26 @@ class compare_rects_leftmost_lower
 			return lhs_l.x < rhs_l.x;
 		}
 };
+class compare_rects_closest_to_point_x
+{
+	int point;
+	int x_dist(cv::Point p)
+	{
+		return std::abs(p.x-point);
+	}
+	public:
+		compare_rects_closest_to_point_x(int x)
+		{
+			point = x;
+		}
+		bool operator()(std::vector<cv::Point> const & lhs, std::vector<cv::Point> const & rhs)
+		{
+			int lhs_l = std::min(x_dist(get_leftmost_point(lhs)),x_dist(get_rightmost_point(lhs)));
+			int rhs_l = std::min(x_dist(get_leftmost_point(rhs)),x_dist(get_rightmost_point(rhs)));
+
+			return lhs_l < rhs_l;
+		}
+};
 void test_point_filter()
 {
 	std::vector<cv::Point> t1;
@@ -221,6 +241,26 @@ void send_serialization_data(serialization::serialization_state const & data, ne
 	socket.write(std::string(data.buffer,data.bufferUsed)); //send the data over.
 }
 
+
+const float camera_lens_angle = 120.f * (3.1415192654f / 180.f);
+
+unsigned int res_x = 640;
+unsigned int res_y = 480;
+
+
+
+
+float calculate_angle(cv::Point center_point)
+{
+	//just calculate x angle
+	int pos = center_point.x - res_x/2; 
+
+	float res_angle = (static_cast<float>(pos) / static_cast<float>(res_x))  * camera_lens_angle;
+	return res_angle;
+}
+
+
+
 int main(int argument_count, char** arguments)
 {
 
@@ -234,7 +274,7 @@ int main(int argument_count, char** arguments)
 	flag_interpreter::results_t flags;
 
 	auto shorthands = flag_interpreter::shorthands_t{
-		{"c","camera"}, {"p","picture_path"},{"v","video_path"},{"h","help"},{"g","gui"},{"t","time"},{"ds","downsample"}, 
+		{"c","camera"}, {"p","picture_path"},{"v","video_path"},{"h","help"},{"g","gui"},{"t","time"},{"ds","downsample"},{"s","server"}
 	};
 	try 
     {   
@@ -251,9 +291,14 @@ int main(int argument_count, char** arguments)
 	bool measure_time = false;
 	bool downsample_gui = false;
 
-	std::optional<int> camera_port;
-	std::optional<std::string> picture_path;
+	std::optional<VideoCapture> camera;
+	std::optional<cv::Mat> picture;
 	std::optional<std::string> video_path;
+	std::optional<network::socket> server_socket;
+	std::optional<network::socket> client_socket;
+
+
+
 	
 	//TODO - ugly code. needs to be a template function
 	for (auto& flag : flags)
@@ -271,7 +316,17 @@ int main(int argument_count, char** arguments)
 			}
 			try
 			{
-				camera_port = std::stoi(flag.option[0]);
+				auto camera_port = std::stoi(flag.option[0]);
+				
+				camera = VideoCapture(camera_port); // open the default camera;
+				if(!camera->isOpened())  // check if we succeeded
+				{
+					throw std::runtime_error("camera doesn't exist");
+				}
+				camera->set(cv::CAP_PROP_FRAME_WIDTH,res_x);
+				camera->set(cv::CAP_PROP_FRAME_HEIGHT,res_y);
+				camera->set(cv::CAP_PROP_EXPOSURE,-10);
+				printf("Camera ready.\n");
 			}
 			catch ( std::exception const &)
 			{
@@ -289,7 +344,8 @@ int main(int argument_count, char** arguments)
 			{
 				throw std::runtime_error("invalid options count for picture_path file");
 			}
-			picture_path = flag.option[0];
+			auto picture_path = flag.option[0];
+			picture = imread(picture_path);
 		}
 		else if (flag.flag == "video_path")
 		{
@@ -322,7 +378,21 @@ int main(int argument_count, char** arguments)
 		{
 			downsample_gui = true; 
 		}
-		else if (flag.flag == "sockettestserver")
+		else if (flag.flag == "fakeserver")
+		{
+			network::socket server(5667);
+
+			server.bind_as_server();
+			auto client = server.listen_for_client();
+			while(true)
+			{
+				serialization::serialization_state state(1);
+				serialization::serialize((float)0.f,state);
+
+				send_serialization_data(state,client);
+			}
+		}
+		else if (flag.flag == "sockettestserver") //TODO marked for deletion
 		{
 			network::socket server(5667);
 
@@ -346,6 +416,32 @@ int main(int argument_count, char** arguments)
 
 
 			return 0;
+		}
+		else if (flag.flag == "server")
+		{
+			printf("---REAL CAMERA TRACKING SERVER---\n");
+			bool got_sock = false;
+			for (unsigned short i = 5667; i < 5667+11; i++)
+			{
+				try
+				{
+					server_socket = network::socket(i);
+					server_socket->bind_as_server();
+					printf("Bound to port %d\n",i);
+					got_sock = true;
+					break;
+				}
+				catch (std::exception const &)
+				{
+					printf("caught\n");
+				}
+			}
+			if (!got_sock)
+			{
+				throw std::runtime_error("Couldn't get any network socket. This is caused by the roborio disconnecting and forcing the jetson to spin up a new server more than 10 times.");
+			}
+			//Wait until finished parsing flags to listen for client -- so that we don't block wait while other flags are trying to be parsed.
+
 		}
 		else if (flag.flag == "sockettestclient")
 		{
@@ -397,6 +493,12 @@ int main(int argument_count, char** arguments)
 	}
 
 
+	//We do this outside of the flag parsing because it causes a block wait.
+	if (server_socket.has_value())
+	{
+		client_socket =  server_socket->listen_for_client();
+		printf("BEGIN SENDING DATA\n");
+	}
 
 
 
@@ -406,8 +508,6 @@ int main(int argument_count, char** arguments)
 
 
 
-    VideoCapture cap;
-	Mat picture;
 
 
 	double total_frame_time = 0.f;
@@ -416,20 +516,6 @@ int main(int argument_count, char** arguments)
 	int total_frames = 0;
 
 	
-	if (camera_port.has_value())
-	{
-		cap = VideoCapture(camera_port.value()); // open the default camera;
-		if(!cap.isOpened())  // check if we succeeded
-		{
-			throw std::runtime_error("camera doesn't exist");
-		}
-		cap.set(cv::CAP_PROP_FRAME_WIDTH,1280);
-		cap.set(cv::CAP_PROP_FRAME_HEIGHT,720);
-	}
-	else if (picture_path.has_value())
-	{
-		picture = imread(picture_path.value());
-	}
 
 
     Mat edges;
@@ -450,17 +536,14 @@ int main(int argument_count, char** arguments)
 			start_time = get_unix_time();
 		}
 
-		//cap.set(CAP_PROP_AUTO_EXPOSURE, 1);
-		//cap.set(CAP_PROP_EXPOSURE, 000);
-		
         Mat frame;
-		if (camera_port.has_value())
+		if (camera.has_value())
 		{
-			cap >> frame; // get a new frame from camera
+			*camera >> frame; // get a new frame from camera
 		}
-		else if (picture_path.has_value())
+		else if (picture.has_value())
 		{
-			picture.copyTo(frame);
+			picture->copyTo(frame);
 		}
 
 		
@@ -504,7 +587,8 @@ int main(int argument_count, char** arguments)
 		findContours(filtered, out_contours, out_hiearchy, RETR_LIST, CHAIN_APPROX_TC89_L1);
 
 
-		std::sort(out_contours.begin(), out_contours.end(), compare_rects_leftmost_lower());
+		//std::sort(out_contours.begin(), out_contours.end(), compare_rects_leftmost_lower());
+		std::sort(out_contours.begin(), out_contours.end(), compare_rects_closest_to_point_x(res_x/2));
 
 
 		
@@ -520,16 +604,20 @@ int main(int argument_count, char** arguments)
 
 		
 
-
+		std::optional<cv::Point> center;
+		if (out_contours.size() >= 2)
+		{
+			center = center_point_on_angled_rects(out_contours);
+		}
 
 		if (display_gui)
 		{
 			auto finalimg = draw_rects_on_image(frame, out_contours);
-			if (out_contours.size() >= 2)
+			if (center.has_value())
 			{
-				cv::Point center = center_point_on_angled_rects(out_contours);
-				circle(finalimg, center, 30, Scalar(100,200,255),5);
+				circle(finalimg, center.value(), 30, Scalar(100,200,255),5);
 			}
+			
 			if (downsample_gui)
 			{
 				cv::Mat resized;
@@ -542,6 +630,26 @@ int main(int argument_count, char** arguments)
 			}
 			if(waitKey(30) >= 0) printf("k\n");
 		}
+
+		if (center.has_value())
+		{
+			float angle = calculate_angle(center.value());
+			printf("Angle: %f\n",angle);
+			if (client_socket.has_value()) //if there is a client connected
+			{
+				serialization::serialization_state state(1);
+				serialization::serialize(angle,state);
+
+				send_serialization_data(state,client_socket.value());\
+				printf("Server sent value.\n");
+
+				//client_socket->read(2);
+				//printf("Now proceed.\n");
+			}
+
+		}
+
+
 		//imwrite("redchntest",planes[0]);
 		printf("showed img\n");
 
