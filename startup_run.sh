@@ -7,6 +7,6 @@ cd "${0%/*}"
 
 
 while true; do 
-./my_test -c 0 -s 
+./my_test -c 0 -s -r distortion.xml
 echo RESTART SERVER
 done

@@ -13,6 +13,7 @@ int main()
 #include <map>
 #include <optional>
 #include <sys/time.h>
+#include <cmath>
 
 
 #include "opencv2/opencv.hpp"
@@ -23,6 +24,61 @@ int main()
 #include "serialization/serialization.hpp"
 
 using namespace cv;
+
+
+//Non-configurable constants:
+
+const double to_rad = (3.141592654f / 180.f);
+const double to_deg = (180.f / 3.141592654f);
+
+//TODO : file with all of these configs
+//Configurable constants:
+
+const unsigned int res_x = 640;
+const unsigned int res_y = 480;
+
+
+//used to determine the angle given px from center
+const float angle_coeffecient =  ( 120.f * to_rad ) /sqrt(pow(res_x,2)+pow(res_y,2));
+
+const double real_length = 4.875; //inches
+//the measured length @ 1 meter
+const double calib_measured_length = 31.400637f;// camera px @ 640x480
+const double focal_length = (calib_measured_length*39.37)/(real_length);
+
+const double camera_location_inches_from_center = 14.f;
+/*!
+ * Gives y distance (how far away) in inches
+ */
+const double y_distance_to_tape_from_camera(double measured_length)
+{
+	return (real_length*focal_length)/(measured_length);
+}
+
+double camera_angle_to(double x_center_pos)
+{
+	double from_center = x_center_pos - (res_x/2);
+	double angle_from_camera = from_center*angle_coeffecient;
+	return angle_from_camera;
+}
+
+//const double to_
+/*!
+ * Gives x distance (how right/left) in inches
+ */
+const double x_distance_to_tape(double measured_length, double x_center_pos)
+{
+	double angle_from_camera=camera_angle_to(x_center_pos);
+
+	return y_distance_to_tape_from_camera(measured_length) * tan(angle_from_camera);
+
+}
+
+const double angle_from_bot(double x_dist, double y_dist_from_camera)
+{
+	double y_dist = y_dist_from_camera + camera_location_inches_from_center;
+	return atan(x_dist/y_dist);
+}
 
 
 
@@ -90,6 +146,67 @@ cv::Point get_rightmost_point(std::vector<cv::Point> point_vec)
 	},
 	point_vec);
 }
+/*!
+ * This generates a value that can be used to compare 2 points on x and y simultaniously.
+ */
+double score_point(cv::Point point, bool wantRight, bool wantBottom)
+{
+	if (!wantRight)
+	{
+		point.x *= -1;
+	}
+	if (!wantBottom)
+	{
+		point.y *= -1;
+	}
+	return point.x + point.y;
+}
+//Structure:
+//0 - top left
+//1 - top right
+//2 - bottom right
+//3 - bottom left
+std::vector<cv::Point> get_rect_corners(std::vector<cv::Point> point_vec)
+{
+	std::vector<cv::Point> result;
+	result.push_back(filter_points([](cv::Point a, cv::Point b)
+	{
+		if (score_point(a,false,false) > score_point(b,false,false))
+		{
+			return a;
+		}
+		return b;
+	},
+	point_vec));
+	result.push_back(filter_points([](cv::Point a, cv::Point b)
+	{
+		if (score_point(a,true,false) > score_point(b,true,false))
+		{
+			return a;
+		}
+		return b;
+	},
+	point_vec));
+	result.push_back(filter_points([](cv::Point a, cv::Point b)
+	{
+		if (score_point(a,true,true) > score_point(b,true,true))
+		{
+			return a;
+		}
+		return b;
+	},
+	point_vec));
+	result.push_back(filter_points([](cv::Point a, cv::Point b)
+	{
+		if (score_point(a,false,true) > score_point(b,false,true))
+		{
+			return a;
+		}
+		return b;
+	},
+	point_vec));
+	return result;
+}
 class compare_rects_leftmost_lower
 {
 	public:
@@ -121,6 +238,7 @@ class compare_rects_closest_to_point_x
 			return lhs_l < rhs_l;
 		}
 };
+
 void test_point_filter()
 {
 	std::vector<cv::Point> t1;
@@ -173,7 +291,35 @@ cv::Point center_point_on_angled_rects(std::vector<std::vector<cv::Point>> rect_
 
 	return get_average_pt(closest_to_center_left,closest_to_center_right);	
 }
+double get_area(std::vector<cv::Point> rect)
+{
+	return ((rect[0].x*rect[1].y - rect[1].x*rect[0].y) + (rect[1].x * rect[2].y - rect[2].x * rect[1].y) + (rect[2].x  * rect[3].y - rect[3].x * rect[2].y) + (rect[3].x * rect[0].y - rect[0].x * rect[3].y))/2.f;
+}
+class compare_rects_biggest
+{
+	public:
+		compare_rects_biggest()
+		{
+		}
+		bool operator()(std::vector<cv::Point> const & lhs, std::vector<cv::Point> const & rhs)
+		{
+			return get_area(get_rect_corners(lhs)) > get_area(get_rect_corners(rhs));
+		}
+};
 
+
+cv::Point get_center(std::vector<cv::Point> rect)
+{
+	//center can be obtained simply by averaging all of the points.
+	double tot_x,tot_y = 0;
+	for (auto this_pt : rect)
+	{
+		tot_x += this_pt.x;
+		tot_y += this_pt.y;
+	}
+	double size = static_cast<double>(rect.size());
+	return cv::Point{tot_x/size,tot_y/size};
+}
 
 
 constexpr double px_closeness(double px, double target)
@@ -183,7 +329,7 @@ constexpr double px_closeness(double px, double target)
 static_assert(px_closeness(1.25,1)==.75, "px_closeness is incorrect");
 static_assert(px_closeness(.75,1)==.75, "px_closeness is incorrect");
 
-double channel_closeness(Vec3b const & channel, Vec3b const & target)
+double channel_closeness(Vec3b const & channel, Vec3b const & target, Vec3f const & channel_weights)
 {
 	//printf(" ch %d %d %d\n",channel[0],channel[1],channel[2]);
 	//printf(" target %d %d %d\n",target[0],target[1],target[2]);
@@ -194,10 +340,11 @@ double channel_closeness(Vec3b const & channel, Vec3b const & target)
 
 	//printf("0 1 2 %f %f %f\n",ch0,ch1,ch2);
 
-	return (ch0+ch1+ch2)/3.f;
+	return (ch0*channel_weights[0])+(ch1*channel_weights[1])+(ch2*channel_weights[2]);
 }
 
-Mat closeness_rating(Mat const & image, Vec3b const & target)
+
+Mat closeness_rating(Mat const & image, Vec3b const & target, Vec3f channel_weights, float min_percent)
 {
 	Mat final_img(image.size(),CV_8UC1);
 #pragma omp parallel
@@ -207,8 +354,8 @@ Mat closeness_rating(Mat const & image, Vec3b const & target)
 		for( size_t col = 0; col < image.cols; col++)
 		{
 			auto px = image.at<Vec3b>(row,col);
-			double rating = channel_closeness(px,target);
-			if (rating < .90f)
+			double rating = channel_closeness(px,target,channel_weights);
+			if (rating < min_percent)
 			{
 				rating = 0.f;
 			}
@@ -218,14 +365,6 @@ Mat closeness_rating(Mat const & image, Vec3b const & target)
 	}
 	return final_img;
 }
-
-
-enum class pull_mode
-{
-	camera,
-	image,
-	video_path
-};
 
 
 /*!
@@ -242,22 +381,60 @@ void send_serialization_data(serialization::serialization_state const & data, ne
 }
 
 
-const float camera_lens_angle = 120.f * (3.1415192654f / 180.f);
-
-unsigned int res_x = 640;
-unsigned int res_y = 480;
 
 
 
-
-float calculate_angle(cv::Point center_point)
+class file_not_found : public std::exception
 {
-	//just calculate x angle
-	int pos = center_point.x - res_x/2; 
+	public:
+		std::string s_msg;
+		const char* msg;
+		file_not_found(std::string filename)
+		{
+			s_msg = (std::string("File ") + filename + " not found");
+			msg = s_msg.c_str();
+		}
+		virtual const char* what() const noexcept override 
+		{
+			return msg;
+		}
+};
 
-	float res_angle = (static_cast<float>(pos) / static_cast<float>(res_x))  * camera_lens_angle;
-	return res_angle;
-}
+class distortion
+{
+	public:
+		Mat distortion_coeffecients;
+		Mat camera_matrix;
+		Mat map1, map2;
+		int width, height;
+		distortion(std::string filename)
+		{
+			cv::FileStorage fs(filename.c_str(), FileStorage::READ);
+			if (!fs.isOpened())
+			{
+				throw file_not_found(filename);
+			}
+
+			//fs >> "Distortion_Coefficients" >> distortion_coeffecients;
+			fs["Distortion_Coefficients"] >> distortion_coeffecients;
+			fs["Camera_Matrix"] >> camera_matrix;
+			fs["image_Width"] >> width;
+			fs["image_Height"] >> height;
+
+			auto image_size = cv::Size2d(width,height);
+
+			initUndistortRectifyMap(camera_matrix,distortion_coeffecients, Mat(),
+            getOptimalNewCameraMatrix(camera_matrix, distortion_coeffecients, image_size, 1, image_size, 0), 
+            image_size, CV_16SC2, map1, map2);
+		}
+		cv::Mat undistort(cv::Mat const & in)
+		{
+			Mat out;
+			remap(in, out, map1, map2, INTER_LINEAR);
+			return out;
+		}
+
+};
 
 
 
@@ -274,7 +451,7 @@ int main(int argument_count, char** arguments)
 	flag_interpreter::results_t flags;
 
 	auto shorthands = flag_interpreter::shorthands_t{
-		{"c","camera"}, {"p","picture_path"},{"v","video_path"},{"h","help"},{"g","gui"},{"t","time"},{"ds","downsample"},{"s","server"}
+		{"c","camera"}, {"p","picture_path"},{"v","video_path"},{"h","help"},{"g","gui"},{"t","time"},{"ds","downsample"},{"sa","space_advance"},{"s","server"},{"r","rectification"}
 	};
 	try 
     {   
@@ -291,11 +468,19 @@ int main(int argument_count, char** arguments)
 	bool measure_time = false;
 	bool downsample_gui = false;
 
+	bool write_picture = false;
+
+	bool space_advance = false;
+
 	std::optional<VideoCapture> camera;
 	std::optional<cv::Mat> picture;
 	std::optional<std::string> video_path;
 	std::optional<network::socket> server_socket;
 	std::optional<network::socket> client_socket;
+
+	std::optional<cv::VideoWriter> video_writer;
+
+	std::optional<distortion> my_distortion;
 
 
 
@@ -325,6 +510,7 @@ int main(int argument_count, char** arguments)
 				}
 				camera->set(cv::CAP_PROP_FRAME_WIDTH,res_x);
 				camera->set(cv::CAP_PROP_FRAME_HEIGHT,res_y);
+				camera->set(cv::CAP_PROP_AUTO_EXPOSURE,0);
 				camera->set(cv::CAP_PROP_EXPOSURE,-10);
 				printf("Camera ready.\n");
 			}
@@ -332,6 +518,39 @@ int main(int argument_count, char** arguments)
 			{
 				throw std::runtime_error("Invalid argument for camera (needs integer value)");
 			}
+		}
+		else if (flag.flag == "video_path")
+		{
+			if (has_picture_method)
+			{
+				throw std::runtime_error("Already specified picture/video input method."); 
+			}
+			has_picture_method = true;
+			if (flag.option.size() != 1)
+			{
+				throw std::runtime_error("invalid options count for camera port");
+			}
+			try
+			{
+				camera = VideoCapture(flag.option[0]);
+				if (!camera->isOpened())
+				{
+					throw std::runtime_error("Video file doesn't exist");
+				}
+				printf("Video opened\n");
+			}
+			catch (std::exception const &)
+			{
+				throw std::runtime_error("Invalid argument for video");
+			}
+		}
+		else if (flag.flag == "rectification")
+		{
+			if (flag.option.size() != 1)
+			{
+				throw std::runtime_error("Need configuration file (generated by the program HERE: https://docs.opencv.org/2.4/doc/tutorials/calib3d/camera_calibration/camera_calibration.html ) to rectify.");
+			}
+			my_distortion = {distortion(flag.option[0])};
 		}
 		else if (flag.flag == "picture_path")
 		{
@@ -392,31 +611,6 @@ int main(int argument_count, char** arguments)
 				send_serialization_data(state,client);
 			}
 		}
-		else if (flag.flag == "sockettestserver") //TODO marked for deletion
-		{
-			network::socket server(5667);
-
-			server.bind_as_server();
-
-			auto client = server.listen_for_client();
-
-			printf("recieved msg %s\n",client.read(14).c_str());
-
-
-			uint32_t data = 0;
-			while(true)
-			{
-				serialization::serialization_state state(1);
-				serialization::serialize(data,state);
-				serialization::serialize((float)data,state);
-
-				send_serialization_data(state,client);
-				data++;
-			}
-
-
-			return 0;
-		}
 		else if (flag.flag == "server")
 		{
 			printf("---REAL CAMERA TRACKING SERVER---\n");
@@ -443,49 +637,22 @@ int main(int argument_count, char** arguments)
 			//Wait until finished parsing flags to listen for client -- so that we don't block wait while other flags are trying to be parsed.
 
 		}
-		else if (flag.flag == "sockettestclient")
+		else if (flag.flag == "write_picture")
 		{
-			network::socket client(5667);
-
-			client.connect_to_server("127.0.0.1");
-			client.write("Hello, World!!\n");
-
-			while(true)
-			{
-				//get size
-				std::string buf_size = client.read(12);
-
-				auto unser_size_state = serialization::unserialization_state(buf_size.data());
-
-				//alloc
-				auto need_to_read = static_cast<size_t>(serialization::unserialize<serialization::size_tp>(unser_size_state));
-				need_to_read = 8;
-				printf("v %d ntr %lu\n",unser_size_state.serializedVersion,need_to_read);
-				auto buffer = client.read(need_to_read);
-				auto unser_state = serialization::unserialization_state(buffer.data());
-
-				for (size_t i = 0; i < need_to_read; i++)
-				{
-					printf("this byte %d\n",(unsigned char) buffer[i]);
-				}
-
-				uint32_t result = serialization::unserialize<uint32_t>(unser_state);
-
-				printf("Got number %d\n",result);
-			}
-
-
-
-
-			//printf("recieved msg %s\n",client.read(12).c_str());
-			return 0;
+			write_picture=true;
+		}
+		else if (flag.flag == "write_video")
+		{
+			video_writer = cv::VideoWriter("outvideo.avi",cv::VideoWriter::fourcc('X','V','I','D'),25.f,cv::Size2d{static_cast<double>(res_x),static_cast<double>(res_y)},true);
+		}
+		else if (flag.flag == "space_advance")
+		{
+			space_advance = true;
 		}
 		else
 		{
 			throw std::runtime_error("Unrecognized command "+flag.flag);
 		}
-			
-			
 	}
 	if (!has_picture_method)
 	{
@@ -528,6 +695,7 @@ int main(int argument_count, char** arguments)
 
 
 	
+	size_t frames = 0;
     while(true)
     {
 		double start_time;
@@ -545,6 +713,28 @@ int main(int argument_count, char** arguments)
 		{
 			picture->copyTo(frame);
 		}
+
+		if (write_picture)
+		{	
+			if (frames >= 100)
+			{
+				imwrite("OUT_PIC.jpg",frame);	
+				exit(0);
+			}
+		}
+		if (video_writer.has_value())
+		{
+			video_writer->write(frame);	
+		}
+
+		//Process
+		
+		if (my_distortion.has_value())
+		{
+			//rectify
+			frame = my_distortion->undistort(frame);
+		}
+
 
 		
 		double time_took_to_take_picture;
@@ -572,8 +762,9 @@ int main(int argument_count, char** arguments)
 		//2: red
 
 
-		auto in = Vec3b{232,255,126};
-		auto correct_pxs = closeness_rating(frame,in);
+		auto in = Vec3b{36,102,4};//Vec3b{17,112,7};//Vec3b{218,255,123};//Vec3b{232,255,126};
+		auto weights = Vec3f{.20,.6,.20};
+		auto correct_pxs = closeness_rating(frame,in,weights,.6);
 
 		Mat filtered;
 
@@ -586,13 +777,23 @@ int main(int argument_count, char** arguments)
 
 		findContours(filtered, out_contours, out_hiearchy, RETR_LIST, CHAIN_APPROX_TC89_L1);
 
+		std::vector<std::vector<cv::Point>> good_shapes = {};
+
 
 		//std::sort(out_contours.begin(), out_contours.end(), compare_rects_leftmost_lower());
-		std::sort(out_contours.begin(), out_contours.end(), compare_rects_closest_to_point_x(res_x/2));
+		std::sort(out_contours.begin(), out_contours.end(), compare_rects_biggest());//compare_rects_closest_to_point_x(res_x/2));
+		for (size_t i = 0; i < 2; i++)
+		{
+			if (out_contours.begin()+i == out_contours.end())
+			{
+				break;
+			}
+			good_shapes.push_back(out_contours[i]);
+		}
 
 
 		
-		/*for (auto i : out_contours)
+		/*for (auto i : good_shapes)
 		{
 			for (auto o : i)
 			{
@@ -600,22 +801,55 @@ int main(int argument_count, char** arguments)
 			}
 			printf(";\n");
 		}*/
-		printf("countr # %d\n",out_contours.size());
+		printf("countr # %d\n",good_shapes.size());
 
 		
 
 		std::optional<cv::Point> center;
-		if (out_contours.size() >= 2)
+		if (good_shapes.size() >= 2)
 		{
-			center = center_point_on_angled_rects(out_contours);
+			center = center_point_on_angled_rects(good_shapes);
 		}
 
 		if (display_gui)
 		{
-			auto finalimg = draw_rects_on_image(frame, out_contours);
+			auto finalimg = draw_rects_on_image(frame, good_shapes);
 			if (center.has_value())
 			{
 				circle(finalimg, center.value(), 30, Scalar(100,200,255),5);
+				for (auto rect : good_shapes)
+				{
+					auto corners = get_rect_corners(rect);
+					unsigned int i = 0;
+					for(cv::Point pt : corners)
+					{
+						/*if(!(i==0 || i == 3))
+						{
+							i++;
+							continue;
+						}*/
+						circle(finalimg, pt, 1, Scalar(i == 2? 200 : 0,(i> 2? 2 : i)*100,i>2? (i-2)*100 : 100),5);
+						i++;
+					}
+					printf("this rect area %f\n",get_area(corners));
+					//this will not be accurate to the actual length, HOWEVER it does preserve ratios -- meaning it can be used to find the distance to the rectangle.
+					double length = sqrt(get_area(corners));//sqrt(pow(rect[3].x-rect[0].x,2) + pow(rect[3].y - rect[0].y,2));
+					cv::Point center = center_point_on_angled_rects(good_shapes);//get_center(corners);
+					double pre_y_dist = y_distance_to_tape_from_camera(length);
+					double x_dist = x_distance_to_tape(length, center.x);
+
+					double angle= angle_from_bot(x_dist,pre_y_dist);
+					
+
+
+					printf("this rect length %f\n",length);
+					printf("distance %f\n",pre_y_dist);
+					printf("x_dist %f\n",x_dist);
+					printf("angle from bot: %f\n",angle*to_deg);
+					printf("angle from camera: %f\n",camera_angle_to(center.x)*to_deg);
+					//printf("this rect dist %f\n",distance_to_tape(length));
+					
+				}
 			}
 			
 			if (downsample_gui)
@@ -628,19 +862,31 @@ int main(int argument_count, char** arguments)
 			{
 				imshow("edges",finalimg);//channel_closeness({210,255,0}, frame));
 			}
-			if(waitKey(30) >= 0) printf("k\n");
+			while(true)
+			{
+				int waitkey_val = waitKey(30);
+				if (space_advance)
+				{
+					if (waitkey_val != 32)
+					{
+						continue;
+					}
+				}	
+				break;
+			}
 		}
 
 		if (center.has_value())
 		{
-			float angle = calculate_angle(center.value());
+			//TODO TODO TODO FIX ANGLE CALCULATOR TO NEW ONE!
+			float angle = 0.f; //calculate_angle(center.value());
 			printf("Angle: %f\n",angle);
 			if (client_socket.has_value()) //if there is a client connected
 			{
 				serialization::serialization_state state(1);
 				serialization::serialize(angle,state);
 
-				send_serialization_data(state,client_socket.value());\
+				send_serialization_data(state,client_socket.value());
 				printf("Server sent value.\n");
 
 				//client_socket->read(2);
@@ -664,6 +910,7 @@ int main(int argument_count, char** arguments)
 			printf("this frame: %f FPS\navg: %f FPS over %d samples\n",1/time_took,frame_times_sampled/total_frame_time,frame_times_sampled);
 			printf("camera: %f FPS\navg: %f FPS\n",1/time_took_to_take_picture, frame_times_sampled/total_camera_capture_time);
 		}
+		frames++;
     }
     // the camera will be deinitialized automatically in video_pathCapture destructor
     return 0;

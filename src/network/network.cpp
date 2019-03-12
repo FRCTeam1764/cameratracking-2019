@@ -4,6 +4,8 @@
 #include <netdb.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <netinet/tcp.h>
+
 
 #include <stdlib.h> 
 #include <cstring>   
@@ -29,6 +31,21 @@ namespace network
 		addr.sin_family = AF_INET;
 		addr.sin_addr.s_addr = INADDR_ANY;
 		addr.sin_port = htons(port);
+        
+        //set tcp no no delay https://stackoverflow.com/a/17843292
+		int flag = 1;
+		int result = setsockopt
+		(
+			socketfd,            /* socket affected */
+			IPPROTO_TCP,     /* set option at TCP level */
+			TCP_NODELAY,     /* name of option */
+			(char *) &flag,  /* the cast is historical cruft */
+			sizeof(int)    /* length of option value */
+		);
+		if (result < 0)
+		{
+			throw std::runtime_error("Couldn't set tcp no delay");
+		}
 	}
 	socket::~socket()
 	{
