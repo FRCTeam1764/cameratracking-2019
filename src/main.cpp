@@ -82,6 +82,8 @@ const double angle_from_bot(double x_dist, double y_dist_from_camera)
 
 
 
+
+
 double get_unix_time()
 {
     struct timeval tv;
@@ -436,7 +438,30 @@ class distortion
 
 };
 
+struct angle_and_distance
+{
+	double angle;
+	double distance;
+};
+angle_and_distance get_robot_angle_and_distance(std::vector<std::vector<cv::Point>> rects)
+{
+	angle_and_distance returnval;
+	auto rect = rects[0]; //use the bigger rectangle
+	auto corners = get_rect_corners(rect);
 
+	//this will not be accurate to the actual length, HOWEVER it does preserve ratios -- meaning it can be used to find the distance to the rectangle.
+	double length = sqrt(get_area(corners));
+
+	cv::Point center = center_point_on_angled_rects(rects);
+	double pre_y_dist = y_distance_to_tape_from_camera(length);
+	double x_dist = x_distance_to_tape(length, center.x);
+
+	returnval.angle = angle_from_bot(x_dist,pre_y_dist);
+	returnval.distance = pre_y_dist + camera_location_inches_from_center;
+
+	return returnval;
+
+}
 
 int main(int argument_count, char** arguments)
 {
@@ -817,39 +842,7 @@ int main(int argument_count, char** arguments)
 			if (center.has_value())
 			{
 				circle(finalimg, center.value(), 30, Scalar(100,200,255),5);
-				for (auto rect : good_shapes)
-				{
-					auto corners = get_rect_corners(rect);
-					unsigned int i = 0;
-					for(cv::Point pt : corners)
-					{
-						/*if(!(i==0 || i == 3))
-						{
-							i++;
-							continue;
-						}*/
-						circle(finalimg, pt, 1, Scalar(i == 2? 200 : 0,(i> 2? 2 : i)*100,i>2? (i-2)*100 : 100),5);
-						i++;
-					}
-					printf("this rect area %f\n",get_area(corners));
-					//this will not be accurate to the actual length, HOWEVER it does preserve ratios -- meaning it can be used to find the distance to the rectangle.
-					double length = sqrt(get_area(corners));//sqrt(pow(rect[3].x-rect[0].x,2) + pow(rect[3].y - rect[0].y,2));
-					cv::Point center = center_point_on_angled_rects(good_shapes);//get_center(corners);
-					double pre_y_dist = y_distance_to_tape_from_camera(length);
-					double x_dist = x_distance_to_tape(length, center.x);
-
-					double angle= angle_from_bot(x_dist,pre_y_dist);
-					
-
-
-					printf("this rect length %f\n",length);
-					printf("distance %f\n",pre_y_dist);
-					printf("x_dist %f\n",x_dist);
-					printf("angle from bot: %f\n",angle*to_deg);
-					printf("angle from camera: %f\n",camera_angle_to(center.x)*to_deg);
-					//printf("this rect dist %f\n",distance_to_tape(length));
-					
-				}
+				
 			}
 			
 			if (downsample_gui)
@@ -878,28 +871,20 @@ int main(int argument_count, char** arguments)
 
 		if (center.has_value())
 		{
-			//TODO TODO TODO FIX ANGLE CALCULATOR TO NEW ONE!
-			float angle = 0.f; //calculate_angle(center.value());
-			printf("Angle: %f\n",angle);
+			auto angle_and_distance_val = get_robot_angle_and_distance(good_shapes);
+			printf("Angle: %f deg\n",angle_and_distance_val.angle*to_deg);
 			if (client_socket.has_value()) //if there is a client connected
 			{
 				serialization::serialization_state state(1);
-				serialization::serialize(angle,state);
+				serialization::serialize(angle_and_distance_val.angle,state);
+				//TODO update client & server to send distance
 
 				send_serialization_data(state,client_socket.value());
-				printf("Server sent value.\n");
-
-				//client_socket->read(2);
-				//printf("Now proceed.\n");
 			}
 
 		}
-
-
-		//imwrite("redchntest",planes[0]);
 		printf("showed img\n");
 
-		
 		if (measure_time)
 		{
 			double time_took = get_unix_time()-start_time;
